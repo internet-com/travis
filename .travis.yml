@@ -4,7 +4,7 @@ branches:
   only:
   - master
   - develop
-  - tmup
+  - staging
   - lity
 
 services:
@@ -51,7 +51,7 @@ after_success:
 
 after_failure:
   - if [[ "$DEPLOY" != "true" ]]; then
-      if [[ "$TRAVIS_BRANCH" == "develop" ]]; then
+      if [[ "$TRAVIS_BRANCH" == "develop" || "$TRAVIS_BRANCH" == "staging" ]]; then
         docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD ;
         BRANCH=$TRAVIS_BRANCH make push_branch_image ;
       fi

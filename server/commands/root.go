@@ -21,6 +21,13 @@ import (
 const (
 	defaultLogLevel = "error"
 	FlagLogLevel    = "log_level"
+	FlagENV         = "env"
+)
+
+const (
+	Staging = 20
+	TestNet = 19
+	MainNet = 18
 )
 
 var (
@@ -52,6 +59,7 @@ func preRunSetup(cmd *cobra.Command, args []string) (err error) {
 func SetUpRoot(cmd *cobra.Command) {
 	cmd.PersistentPreRunE = preRunSetup
 	cmd.PersistentFlags().String(FlagLogLevel, defaultLogLevel, "Log level")
+	cmd.PersistentFlags().String(FlagENV, "testnet", "env")
 }
 
 // copied from ethermint
@@ -122,7 +130,7 @@ func setupEmtContext() error {
 	context = cli.NewContext(a, set, nil)
 
 	context.GlobalSet(ethUtils.DataDirFlag.Name, config.BaseConfig.RootDir)
-	context.GlobalSet(ethUtils.NetworkIdFlag.Name, strconv.Itoa(int(config.EMConfig.EthChainId)))
+	context.GlobalSet(ethUtils.NetworkIdFlag.Name, strconv.Itoa(int(config.EMConfig.ChainId)))
 	context.GlobalSet(emtUtils.VerbosityFlag.Name, strconv.Itoa(int(config.EMConfig.VerbosityFlag)))
 
 	context.GlobalSet(emtUtils.TendermintAddrFlag.Name, config.TMConfig.RPC.ListenAddress)

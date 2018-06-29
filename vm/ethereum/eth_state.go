@@ -106,7 +106,7 @@ func (es *EthState) Commit(receiver common.Address) (common.Hash, error) {
 }
 
 func (es *EthState) EndBlock() {
-	utils.BlockGasFee.Set(es.work.totalUsedGasFee)
+	utils.BlockGasFee = big.NewInt(0).Add(utils.BlockGasFee, es.work.totalUsedGasFee)
 }
 
 func (es *EthState) ResetWorkState(receiver common.Address) error {
@@ -256,17 +256,31 @@ func (ws *workState) commit(blockchain *core.BlockChain, db ethdb.Database) (com
 	proposalIds := utils.PendingProposal.ReachMin(currentHeight)
 	for _, pid := range proposalIds {
 		proposal := gov.GetProposalById(pid)
-		amount := new(big.Int)
-		amount.SetString(proposal.Amount, 10)
 
-		switch gov.CheckProposal(pid, nil) {
-		case "approved":
-			commons.TransferWithReactor(utils.GovHoldAccount, *proposal.To, amount, gov.ProposalReactor{proposal.Id, currentHeight, "Approved"})
-		case "rejected":
-			commons.TransferWithReactor(utils.GovHoldAccount, *proposal.From, amount, gov.ProposalReactor{proposal.Id, currentHeight, "Rejected"})
-		default:
-			commons.TransferWithReactor(utils.GovHoldAccount, *proposal.From, amount, gov.ProposalReactor{proposal.Id, currentHeight, "Expired"})
+		switch proposal.Type {
+		case gov.TRANSFER_FUND_PROPOSAL:
+			amount := new(big.Int)
+			amount.SetString(proposal.Detail["amount"].(string), 10)
+			switch gov.CheckProposal(pid, nil) {
+			case "approved":
+				commons.TransferWithReactor(utils.GovHoldAccount, *proposal.Detail["to"].(*common.Address), amount, gov.ProposalReactor{proposal.Id, currentHeight, "Approved"})
+			case "rejected":
+				commons.TransferWithReactor(utils.GovHoldAccount, *proposal.Detail["from"].(*common.Address), amount, gov.ProposalReactor{proposal.Id, currentHeight, "Rejected"})
+			default:
+				commons.TransferWithReactor(utils.GovHoldAccount, *proposal.Detail["from"].(*common.Address), amount, gov.ProposalReactor{proposal.Id, currentHeight, "Expired"})
+			}
+		case gov.CHANGE_PARAM_PROPOSAL:
+			switch gov.CheckProposal(pid, nil) {
+			case "approved":
+				utils.SetParam(proposal.Detail["name"].(string), proposal.Detail["value"].(string))
+				gov.ProposalReactor{proposal.Id, currentHeight, "Approved"}.React("success", "")
+			case "rejected":
+				gov.ProposalReactor{proposal.Id, currentHeight, "Rejected"}.React("success", "")
+			default:
+				gov.ProposalReactor{proposal.Id, currentHeight, "Expired"}.React("success", "")
+			}
 		}
+
 		utils.PendingProposal.Del(pid)
 	}
 

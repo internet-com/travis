@@ -17,21 +17,21 @@ describe("Stake Test", function() {
       maxAmount * (1 - Globals.ValMinSelfStakingRatio - 0.1),
       "cmt"
     )
-    this.reducedMax = web3.toWei(maxAmount - 1, "cmt")
+    this.reducedMax = web3.toWei(maxAmount * 0.8, "cmt")
   }
   let amounts = new Amounts(2000) // 2000 cmt
   let compRate = "0.8"
 
   let existingValidator = {}
-  let balance_old, balance_new
+  let balance_old, balance_new, tx_result
 
   before(function() {
     // get existing validator
-    let result = web3.cmt.stake.queryValidators()
-    expect(result.data.length).be.above(0)
+    tx_result = web3.cmt.stake.validator.list()
+    expect(tx_result.data.length).be.above(0)
 
-    logger.debug("current validators: ", JSON.stringify(result.data))
-    existingValidator = result.data[0]
+    logger.debug("current validators: ", JSON.stringify(tx_result.data))
+    existingValidator = tx_result.data[0]
     expect(existingValidator).be.an("object")
 
     if (Globals.TestMode == "single") {
@@ -46,8 +46,8 @@ describe("Stake Test", function() {
         from: existingValidator.owner_address,
         pubKey: Globals.PubKeys[3]
       }
-      let r = web3.cmt.stake.declareCandidacy(payload)
-      Utils.expectTxFail(r)
+      tx_result = web3.cmt.stake.validator.declare(payload)
+      Utils.expectTxFail(tx_result)
     })
 
     it("associate to an existing validator pubkey — fail", function() {
@@ -56,8 +56,8 @@ describe("Stake Test", function() {
         from: Globals.Accounts[3],
         pubKey: existingValidator.pub_key.value
       }
-      let r = web3.cmt.stake.declareCandidacy(payload)
-      Utils.expectTxFail(r)
+      tx_result = web3.cmt.stake.validator.declare(payload)
+      Utils.expectTxFail(tx_result)
     })
 
     describe(`Declare to be a validator with ${web3.fromWei(
@@ -69,8 +69,11 @@ describe("Stake Test", function() {
         "cmt"
       )} CMTs.`, function() {
         before(function() {
-          let balance = Utils.getBalance(3)
+          balance = Utils.getBalance(3)
           Utils.transfer(Globals.Accounts[3], web3.cmt.defaultAccount, balance)
+        })
+        after(function() {
+          Utils.transfer(web3.cmt.defaultAccount, Globals.Accounts[3], balance)
         })
 
         it("Fails", function() {
@@ -80,11 +83,8 @@ describe("Stake Test", function() {
             maxAmount: amounts.max,
             compRate: compRate
           }
-          let r = web3.cmt.stake.declareCandidacy(payload)
-          Utils.expectTxFail(r, 20)
-        })
-        after(function(done) {
-          Utils.waitBlocks(done)
+          tx_result = web3.cmt.stake.validator.declare(payload)
+          Utils.expectTxFail(tx_result, 20)
         })
       })
 
@@ -124,12 +124,18 @@ describe("Stake Test", function() {
             maxAmount: amounts.max,
             compRate: compRate
           }
-          let r = web3.cmt.stake.declareCandidacy(payload)
-          Utils.expectTxSuccess(r)
+          tx_result = web3.cmt.stake.validator.declare(payload)
+          Utils.expectTxSuccess(tx_result)
           // balance after
           balance_new = Utils.getBalance(3)
+          let gasFee = Utils.gasFee("declareCandidacy")
           expect(balance_new.minus(balance_old).toNumber()).to.equal(
-            Number(-amounts.self)
+            -gasFee.plus(amounts.self).toNumber()
+          )
+          // check deliver tx tx_result
+          expect(tx_result.deliver_tx.fee.value).to.eq(gasFee.toString())
+          expect(tx_result.deliver_tx.gasUsed).to.eq(
+            web3.toBigNumber(Globals.GasLimit.DeclareCandidacy).toString()
           )
         })
       })
@@ -143,11 +149,11 @@ describe("Stake Test", function() {
         candidateAddress: Globals.Accounts[3],
         verified: true
       }
-      let r = web3.cmt.stake.verifyCandidacy(payload)
-      Utils.expectTxSuccess(r)
+      tx_result = web3.cmt.stake.validator.verify(payload)
+      Utils.expectTxSuccess(tx_result)
       // check validator's status
-      let result = web3.cmt.stake.queryValidators()
-      expect(result.data).to.containSubset([
+      tx_result = web3.cmt.stake.validator.list()
+      expect(tx_result.data).to.containSubset([
         { owner_address: Globals.Accounts[3], verified: "Y" }
       ])
     })
@@ -155,15 +161,15 @@ describe("Stake Test", function() {
 
   describe("Query validator D. ", function() {
     it("make sure all the information are accurate.", function() {
-      let result = web3.cmt.stake.queryValidator(Globals.Accounts[3], 0)
+      tx_result = web3.cmt.stake.validator.query(Globals.Accounts[3], 0)
       // check validator's information
-      logger.debug(result.data)
-      expect(result.data.owner_address).to.eq(Globals.Accounts[3])
-      expect(result.data.verified).to.eq("Y")
-      expect(result.data.comp_rate).to.eq(compRate)
-      expect(result.data.pub_key.value).to.eq(Globals.PubKeys[3])
-      expect(result.data.max_shares).to.eq(amounts.max.toString())
-      expect(result.data.shares).to.eq(amounts.self.toString())
+      logger.debug(tx_result.data)
+      expect(tx_result.data.owner_address).to.eq(Globals.Accounts[3])
+      expect(tx_result.data.verified).to.eq("Y")
+      expect(tx_result.data.comp_rate).to.eq(compRate)
+      expect(tx_result.data.pub_key.value).to.eq(Globals.PubKeys[3])
+      expect(tx_result.data.max_shares).to.eq(amounts.max.toString())
+      expect(tx_result.data.shares).to.eq(amounts.self.toString())
     })
   })
 
@@ -175,6 +181,8 @@ describe("Stake Test", function() {
       before(function() {
         // balance before
         balance_old = Utils.getBalance(1)
+        // delegation before
+        delegation_before = Utils.getDelegation(1, 3)
       })
 
       it("CMTs are moved from account B", function() {
@@ -183,8 +191,8 @@ describe("Stake Test", function() {
           validatorAddress: Globals.Accounts[3],
           amount: amounts.dele1
         }
-        let r = web3.cmt.stake.delegate(payload)
-        Utils.expectTxSuccess(r)
+        tx_result = web3.cmt.stake.delegator.accept(payload)
+        Utils.expectTxSuccess(tx_result)
         // balance after
         balance_new = Utils.getBalance(1)
         expect(balance_new.minus(balance_old).toNumber()).to.equal(
@@ -192,16 +200,16 @@ describe("Stake Test", function() {
         )
       })
       it("CMTs show up as staked balance for B", function() {
-        let result = web3.cmt.stake.queryDelegator(Globals.Accounts[1], 0)
-        let delegation = result.data.filter(
-          d => d.pub_key.value == Globals.PubKeys[3]
-        )
-        expect(delegation.length).to.eq(1)
-        expect(delegation[0].delegate_amount).to.eq(amounts.dele1.toString())
+        let delegation_after = Utils.getDelegation(1, 3)
+        expect(
+          delegation_after.delegate_amount
+            .minus(delegation_before.delegate_amount)
+            .toNumber()
+        ).to.eq(Number(amounts.dele1))
       })
       it("D is still not a validator", function() {
-        let result = web3.cmt.stake.queryValidator(Globals.Accounts[3], 0)
-        let power = result.data.voting_power
+        tx_result = web3.cmt.stake.validator.query(Globals.Accounts[3], 0)
+        let power = tx_result.data.voting_power
         expect(power).to.eq(0)
       })
     })
@@ -212,6 +220,8 @@ describe("Stake Test", function() {
       before(function() {
         // balance before
         balance_old = Utils.getBalance(2)
+        // delegation before
+        delegation_before = Utils.getDelegation(2, 3)
       })
       it("CMTs are moved from account C", function() {
         let payload = {
@@ -219,8 +229,8 @@ describe("Stake Test", function() {
           validatorAddress: Globals.Accounts[3],
           amount: amounts.dele2
         }
-        let r = web3.cmt.stake.delegate(payload)
-        Utils.expectTxSuccess(r)
+        tx_result = web3.cmt.stake.delegator.accept(payload)
+        Utils.expectTxSuccess(tx_result)
         // balance after
         balance_new = Utils.getBalance(2)
         expect(balance_new.minus(balance_old).toNumber()).to.equal(
@@ -228,21 +238,21 @@ describe("Stake Test", function() {
         )
       })
       it("CMTs show up as staked balance for C", function() {
-        let result = web3.cmt.stake.queryDelegator(Globals.Accounts[2], 0)
-        let delegation = result.data.filter(
-          d => d.pub_key.value == Globals.PubKeys[3]
-        )
-        expect(delegation.length).to.eq(1)
-        expect(delegation[0].delegate_amount).to.eq(amounts.dele2.toString())
+        let delegation_after = Utils.getDelegation(2, 3)
+        expect(
+          delegation_after.delegate_amount
+            .minus(delegation_before.delegate_amount)
+            .toNumber()
+        ).to.eq(Number(amounts.dele2))
       })
       it("D is now a validator", function() {
-        let result = web3.cmt.stake.queryValidator(Globals.Accounts[3], 0)
-        let power = result.data.voting_power
+        tx_result = web3.cmt.stake.validator.query(Globals.Accounts[3], 0)
+        let power = tx_result.data.voting_power
         expect(power).to.be.above(0)
       })
       it("One of the genesis validators now drops off", function() {
-        let result = web3.cmt.stake.queryValidators()
-        let drops = result.data.filter(d => d.voting_power == 0)
+        tx_result = web3.cmt.stake.validator.list()
+        let drops = tx_result.data.filter(d => d.voting_power == 0)
         expect(drops.length).to.eq(1)
         expect(drops[0].owner_address).to.not.equal(Globals.Accounts[3])
       })
@@ -257,8 +267,8 @@ describe("Stake Test", function() {
       total_awards = 0
     before(function(done) {
       // get current powers
-      let result = web3.cmt.stake.queryValidators()
-      powers_old = result.data.map(d => d.voting_power)
+      tx_result = web3.cmt.stake.validator.list()
+      powers_old = tx_result.data.map(d => d.voting_power)
       // calc awards
       powers_new = Utils.calcAwards(powers_old, blocks)
       total_awards = powers_new[4] - powers_old[4]
@@ -266,65 +276,58 @@ describe("Stake Test", function() {
       Utils.waitBlocks(done, blocks)
     })
     it("check Validator D's current power", function() {
-      let result = web3.cmt.stake.queryValidator(Globals.Accounts[3], 0)
-      let power = result.data.voting_power
-      console.log(result.data)
+      tx_result = web3.cmt.stake.validator.query(Globals.Accounts[3], 0)
+      let power = tx_result.data.voting_power
+      console.log(tx_result.data)
       // expect(current).to.eq(powers_new[4])
     })
     it("B: total awards * 80% * 0.1", function() {
-      let result = web3.cmt.stake.queryDelegator(Globals.Accounts[1], 0)
-      let delegation = result.data.filter(
-        d => d.pub_key.value == Globals.PubKeys[3]
-      )
+      let delegation = Utils.getDelegation(1, 3)
       console.log(delegation)
-      expect(delegation.length).to.eq(1)
-      // expect((delegation[0].awards = total_awards * 0.8 * 0.1))
+      // expect((delegation.awards = total_awards * 0.8 * 0.1))
     })
     it("C: total awards * 80% * 0.8", function() {
-      let result = web3.cmt.stake.queryDelegator(Globals.Accounts[2], 0)
-      let delegation = result.data.filter(
-        d => d.pub_key.value == Globals.PubKeys[3]
-      )
+      let delegation = Utils.getDelegation(2, 3)
       console.log(delegation)
-      expect(delegation.length).to.eq(1)
-      // expect((delegation[0].awards = total_awards * 0.8 * 0.8))
+      // expect((delegation.awards = total_awards * 0.8 * 0.8))
     })
     it("D: total awards - B - C", function() {
-      let result = web3.cmt.stake.queryDelegator(Globals.Accounts[3], 0)
-      let delegation = result.data.filter(
-        d => d.pub_key.value == Globals.PubKeys[3]
-      )
+      let delegation = Utils.getDelegation(3, 3)
       console.log(delegation)
-      expect(delegation.length).to.eq(1)
-      // expect((delegation[0].awards = total_awards - total_awards * 0.8 * 0.9))
+      // expect((delegation.awards = total_awards - total_awards * 0.8 * 0.9))
     })
   })
 
-  // todo: The withdraw request reduces the stake and voting power immediately, but has
-  // a 7 day waiting period (as measured in block heights) before the fund is actually available
-  // in delegator's account to trade. It puts funds into unstaked_waiting status.
-  describe.skip("Stake Withdraw", function() {
+  describe("Stake Withdraw", function() {
     describe(`Account B withdraw ${web3.fromWei(
       amounts.dele1,
       "cmt"
     )} CMTs for D.`, function() {
+      let delegation_before, delegation_after
       before(function() {
         // balance before
         balance_old = Utils.getBalance(1)
+        // delegation before
+        delegation_before = Utils.getDelegation(1, 3)
       })
-      it("CMTs are moved back to account B", function() {
+      it("CMTs are moved back to account B(locked)", function() {
         let payload = {
           from: Globals.Accounts[1],
           validatorAddress: Globals.Accounts[3],
           amount: amounts.dele1
         }
-        let r = web3.cmt.stake.withdraw(payload)
-        Utils.expectTxSuccess(r)
+        tx_result = web3.cmt.stake.delegator.withdraw(payload)
+        Utils.expectTxSuccess(tx_result)
         // balance after
         balance_new = Utils.getBalance(1)
-        expect(balance_new.minus(balance_old).toNumber()).to.eq(
-          Number(amounts.dele1)
-        )
+        expect(balance_new.minus(balance_old).toNumber()).to.eq(Number(0))
+        // delegation after
+        let delegation_after = Utils.getDelegation(1, 3)
+        expect(
+          delegation_after.withdraw_amount
+            .minus(delegation_before.withdraw_amount)
+            .toNumber()
+        ).to.eq(Number(amounts.dele1))
       })
     })
   })
@@ -340,17 +343,25 @@ describe("Stake Test", function() {
           from: Globals.Accounts[3],
           maxAmount: amounts.reducedMax
         }
-        let r = web3.cmt.stake.updateCandidacy(payload)
-        Utils.expectTxSuccess(r)
+        tx_result = web3.cmt.stake.validator.update(payload)
+        Utils.expectTxSuccess(tx_result)
         // check validator
-        let result = web3.cmt.stake.queryValidator(Globals.Accounts[3], 0)
-        expect(result.data.max_shares).to.be.eq(amounts.reducedMax)
-        expect(result.data.verified).to.be.eq("Y")
+        let r = web3.cmt.stake.validator.query(Globals.Accounts[3], 0)
+        expect(r.data.max_shares).to.be.eq(amounts.reducedMax)
+        expect(r.data.verified).to.be.eq("Y")
       })
       it("No refund will be issued", function() {
         // balance after
         balance_new = Utils.getBalance(3)
-        expect(balance_new.minus(balance_old).toNumber()).to.eq(0)
+        let gasFee = Utils.gasFee("updateCandidacy")
+        expect(balance_new.minus(balance_old).toNumber()).to.eq(
+          -gasFee.toNumber()
+        )
+        // check deliver tx tx_result
+        expect(tx_result.deliver_tx.fee.value).to.eq(gasFee.toString())
+        expect(tx_result.deliver_tx.gasUsed).to.eq(
+          web3.toBigNumber(Globals.GasLimit.UpdateCandidacy).toString()
+        )
       })
     })
     describe("Account D modify other information", function() {
@@ -362,12 +373,12 @@ describe("Stake Test", function() {
             website: website
           }
         }
-        let r = web3.cmt.stake.updateCandidacy(payload)
-        Utils.expectTxSuccess(r)
+        tx_result = web3.cmt.stake.validator.update(payload)
+        Utils.expectTxSuccess(tx_result)
         // check validator
-        let result = web3.cmt.stake.queryValidator(Globals.Accounts[3], 0)
-        expect(result.data.description.website).to.be.eq(website)
-        expect(result.data.verified).to.be.eq("N")
+        tx_result = web3.cmt.stake.validator.query(Globals.Accounts[3], 0)
+        expect(tx_result.data.description.website).to.be.eq(website)
+        expect(tx_result.data.verified).to.be.eq("N")
       })
     })
   })
@@ -382,30 +393,34 @@ describe("Stake Test", function() {
       let payload = {
         from: Globals.Accounts[3]
       }
-      let r = web3.cmt.stake.withdrawCandidacy(payload)
-      Utils.expectTxSuccess(r)
+      tx_result = web3.cmt.stake.validator.withdraw(payload)
+      Utils.expectTxSuccess(tx_result)
       // check validators, no Globals.Accounts[3]
-      let result = web3.cmt.stake.queryValidators()
-      logger.debug(result.data)
-      expect(result.data).to.not.containSubset([
+      tx_result = web3.cmt.stake.validator.list()
+      logger.debug(tx_result.data)
+      expect(tx_result.data).to.not.containSubset([
         { owner_address: Globals.Accounts[3] }
       ])
     })
-    // todo: All its staked CMTs will become unstaked_waiting, and be refunded to their source accounts after 7 days.
-    it("All staked tokens will be distributed back to delegator addresses", function() {
+    it("account balance no change", function() {
       // balance after
       balance_new = Utils.getBalance()
-      // account[1] has withdrawed, refund some interests
-      expect(balance_new[1].minus(balance_old[1]).toNumber() >= 0).to.be.true
-      // account[2] refund delegate amount and interests
-      expect(
-        balance_new[2].minus(balance_old[2]).toNumber() >= Number(amounts.dele2)
-      ).to.be.true
+      for (i = 1; i < 4; ++i) {
+        expect(balance_new[i].minus(balance_old[i]).toNumber()).to.eq(0)
+      }
     })
-    it("Self-staked CMTs will be refunded back to the validator address", function() {
-      expect(
-        balance_new[3].minus(balance_old[3]).toNumber() >= Number(amounts.self)
-      ).to.be.true
+    it("All its staked CMTs will move to withdraw_amount, and be refunded later", function() {
+      for (i = 1; i < 4; ++i) {
+        d = Utils.getDelegation(i, 3)
+        expect(d).to.be.not.null
+        expect(
+          d.delegate_amount
+            .plus(d.award_amount)
+            .minus(d.slash_amount)
+            .minus(d.withdraw_amount)
+            .toNumber()
+        ).to.eq(0)
+      }
     })
   })
 })

@@ -12,25 +12,9 @@ import (
 	"github.com/CyberMiles/travis/sdk/state"
 	"github.com/CyberMiles/travis/types"
 	"github.com/CyberMiles/travis/utils"
+	"github.com/tendermint/go-crypto"
 	"golang.org/x/crypto/ripemd160"
 )
-
-// Params defines the high level settings for staking
-type Params struct {
-	HoldAccount      common.Address `json:"hold_account"` // PubKey where all bonded coins are held
-	MaxVals          uint16         `json:"max_vals"`     // maximum number of validators
-	Validators       string         `json:"validators"`   // initial validators definition
-	SelfStakingRatio string         `json:"self_staking_ratio"`
-}
-
-func defaultParams() Params {
-	return Params{
-		HoldAccount:      utils.HoldAccount,
-		MaxVals:          100,
-		Validators:       "",
-		SelfStakingRatio: "0.1",
-	}
-}
 
 //_________________________________________________________________________
 
@@ -55,36 +39,21 @@ type Candidate struct {
 	Verified     string       `json:"verified"`
 	Active       string       `json:"active"`
 	BlockHeight  int64        `json:"block_height"`
+	Rank         int64        `json:"rank"`
+	State        string       `json:"state"`
 }
 
 type Description struct {
+	Name     string `json:"name"`
 	Website  string `json:"website"`
 	Location string `json:"location"`
-	Details  string `json:"details"`
-}
-
-// NewCandidate - initialize a new candidate
-func NewCandidate(pubKey types.PubKey, ownerAddress common.Address, shares string, votingPower int64, maxShares, compRate string, description Description, verified string, active string, blockHeight int64) *Candidate {
-	now := utils.GetNow()
-	return &Candidate{
-		PubKey:       pubKey,
-		OwnerAddress: ownerAddress.String(),
-		Shares:       shares,
-		VotingPower:  votingPower,
-		MaxShares:    maxShares,
-		CompRate:     compRate,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		Description:  description,
-		Verified:     verified,
-		Active:       active,
-		BlockHeight:  blockHeight,
-	}
+	Email    string `json:"email"`
+	Profile  string `json:"profile"`
 }
 
 // Validator returns a copy of the Candidate as a Validator.
 // Should only be called when the Candidate qualifies as a validator.
-func (c *Candidate) validator() Validator {
+func (c *Candidate) Validator() Validator {
 	return Validator(*c)
 }
 
@@ -136,9 +105,11 @@ func (c *Candidate) Hash() []byte {
 		c.MaxShares,
 		c.CompRate,
 		Description{
-			c.Description.Website,
-			c.Description.Location,
-			c.Description.Details,
+			Name:     c.Description.Name,
+			Website:  c.Description.Website,
+			Location: c.Description.Location,
+			Profile:  c.Description.Profile,
+			Email:    c.Description.Email,
 		},
 		c.Verified,
 		c.Active,
@@ -156,9 +127,13 @@ type Validator Candidate
 
 // ABCIValidator - Get the validator from a bond value
 func (v Validator) ABCIValidator() abci.Validator {
+	pk := v.PubKey.PubKey.(crypto.PubKeyEd25519)
 	return abci.Validator{
-		PubKey: v.PubKey.Bytes(),
-		Power:  v.VotingPower,
+		PubKey: abci.PubKey{
+			Type: abci.PubKeyEd25519,
+			Data: pk[:],
+		},
+		Power: v.VotingPower,
 	}
 }
 
@@ -205,7 +180,7 @@ func (cs Candidates) updateVotingPower(store state.SimpleDB) Candidates {
 	cs.Sort()
 	for i, c := range cs {
 		// truncate the power
-		if i >= int(loadParams(store).MaxVals) {
+		if i >= int(utils.GetParams().MaxVals) {
 			c.VotingPower = 0
 		}
 		updateCandidate(c)
@@ -231,7 +206,7 @@ func (cs Candidates) Validators() Validators {
 		if c.VotingPower == 0 { //exit as soon as the first Voting power set to zero is found
 			return validators[:i]
 		}
-		validators[i] = c.validator()
+		validators[i] = c.Validator()
 	}
 
 	return validators
@@ -282,7 +257,8 @@ func (vs Validators) validatorsChanged(vs2 Validators) (changed []abci.Validator
 				j++
 				continue
 			} // else, the old validator has been removed
-			changed[n] = abci.Validator{vs[i].PubKey.Bytes(), 0}
+			pk := vs[i].PubKey.PubKey.(crypto.PubKeyEd25519)
+			changed[n] = abci.Ed25519Validator(pk[:], 0)
 			n++
 			i++
 			continue
@@ -303,7 +279,8 @@ func (vs Validators) validatorsChanged(vs2 Validators) (changed []abci.Validator
 
 	// remove any excess validators left in set 1
 	for ; i < len(vs); i, n = i+1, n+1 {
-		changed[n] = abci.Validator{vs[i].PubKey.Bytes(), 0}
+		pk := vs[i].PubKey.PubKey.(crypto.PubKeyEd25519)
+		changed[n] = abci.Ed25519Validator(pk[:], 0)
 	}
 
 	return changed[:n]

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethTypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
+	abci "github.com/tendermint/abci/types"
 	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 	ttypes "github.com/tendermint/tendermint/types"
 	cmn "github.com/tendermint/tmlibs/common"
@@ -92,14 +94,29 @@ func (s *CmtRPCService) sendTransaction(args *SendTxArgs) (*ctypes.ResultBroadca
 	return s.backend.BroadcastTxCommit(signed)
 }
 
-// SendRawTransaction will broadcast the signed transaction to tendermint.
+// SendRawTx will broadcast the signed transaction to tendermint.
 // The sender is responsible for signing the transaction and using the correct nonce.
 func (s *CmtRPCService) SendRawTx(encodedTx hexutil.Bytes) (*ctypes.ResultBroadcastTxCommit, error) {
 	tx := new(ethTypes.Transaction)
 	if err := rlp.DecodeBytes(encodedTx, tx); err != nil {
 		return nil, err
 	}
-	return s.backend.BroadcastTxCommit(tx)
+
+	if utils.IsEthTx(tx) {
+		result, err := s.backend.BroadcastTxSync(tx)
+		if err != nil {
+			return nil, err
+		}
+		if result.Code > 0 {
+			return nil, errors.New(result.Log)
+		}
+
+		return &ctypes.ResultBroadcastTxCommit{
+			Hash: ttypes.Tx(encodedTx).Hash(), //tx.Hash().Hex(),
+		}, nil
+	} else {
+		return s.backend.BroadcastTxCommit(tx)
+	}
 }
 
 // GetBlockByNumber returns the requested block by height.
@@ -110,14 +127,22 @@ func (s *CmtRPCService) GetBlockByNumber(height uint64) (*ctypes.ResultBlock, er
 
 // RPCTransaction represents a transaction that will serialize to the RPC representation of a transaction
 type RPCTransaction struct {
-	Height int64          `json:"height"`
-	Hash   cmn.HexBytes   `json:"hash"`
-	From   common.Address `json:"from"`
-	Nonce  hexutil.Uint64 `json:"nonce"`
-	Input  interface{}    `json:"input"`
-	V      *hexutil.Big   `json:"v"`
-	R      *hexutil.Big   `json:"r"`
-	S      *hexutil.Big   `json:"s"`
+	BlockNumber      *hexutil.Big           `json:"blockNumber"`
+	From             common.Address         `json:"from"`
+	Gas              *hexutil.Big           `json:"gas"`
+	GasPrice         *hexutil.Big           `json:"gasPrice"`
+	Hash             common.Hash            `json:"hash"`
+	CmtHash          cmn.HexBytes           `json:"cmt_hash"`
+	Input            hexutil.Bytes          `json:"input"`
+	CmtInput         interface{}            `json:"cmt_input"`
+	Nonce            hexutil.Uint64         `json:"nonce"`
+	To               *common.Address        `json:"to"`
+	TransactionIndex hexutil.Uint           `json:"transactionIndex"`
+	Value            *hexutil.Big           `json:"value"`
+	V                *hexutil.Big           `json:"v"`
+	R                *hexutil.Big           `json:"r"`
+	S                *hexutil.Big           `json:"s"`
+	TxResult         abci.ResponseDeliverTx `json:"tx_result"`
 }
 
 // newRPCTransaction returns a transaction that will serialize to the RPC representation.
@@ -127,31 +152,35 @@ func newRPCTransaction(res *ctypes.ResultTx) (*RPCTransaction, error) {
 	if err := tx.DecodeRLP(rlpStream); err != nil {
 		return nil, err
 	}
-	if utils.IsEthTx(tx) {
-		return nil, errors.New("It's an Ethereum transaction. ")
-	}
 
-	var signer ethTypes.Signer = ethTypes.FrontierSigner{}
-	if tx.Protected() {
-		signer = ethTypes.NewEIP155Signer(tx.ChainId())
-	}
+	signer := ethTypes.NewEIP155Signer(tx.ChainId())
 	from, _ := ethTypes.Sender(signer, tx)
 	v, r, s := tx.RawSignatureValues()
 
 	var travisTx sdk.Tx
-	if err := json.Unmarshal(tx.Data(), &travisTx); err != nil {
-		return nil, err
+	if !utils.IsEthTx(tx) {
+		if err := json.Unmarshal(tx.Data(), &travisTx); err != nil {
+			return nil, err
+		}
 	}
 
 	return &RPCTransaction{
-		Height: res.Height,
-		Hash:   res.Hash,
-		From:   from,
-		Nonce:  hexutil.Uint64(tx.Nonce()),
-		Input:  travisTx,
-		V:      (*hexutil.Big)(v),
-		R:      (*hexutil.Big)(r),
-		S:      (*hexutil.Big)(s),
+		BlockNumber:      (*hexutil.Big)(big.NewInt(res.Height)),
+		From:             from,
+		Gas:              (*hexutil.Big)(tx.Gas()),
+		GasPrice:         (*hexutil.Big)(tx.GasPrice()),
+		Hash:             tx.Hash(),
+		CmtHash:          res.Hash,
+		Input:            hexutil.Bytes(tx.Data()),
+		CmtInput:         travisTx,
+		Nonce:            hexutil.Uint64(tx.Nonce()),
+		To:               tx.To(),
+		TransactionIndex: hexutil.Uint(res.Index),
+		Value:            (*hexutil.Big)(tx.Value()),
+		V:                (*hexutil.Big)(v),
+		R:                (*hexutil.Big)(r),
+		S:                (*hexutil.Big)(s),
+		TxResult:         res.TxResult,
 	}, nil
 }
 
@@ -186,6 +215,27 @@ func (s *CmtRPCService) GetTransactionByHash(hash string) (*RPCTransaction, erro
 	}
 
 	return newRPCTransaction(res)
+}
+
+// DecodeRawTx returns the transaction from the raw tx string in the block data
+func (s *CmtRPCService) DecodeRawTx(raw string) (*RPCTransaction, error) {
+	tx, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, err
+	}
+	return newRPCTransaction(&ctypes.ResultTx{
+		Tx: tx,
+	})
+}
+
+// Info about the node's syncing state
+func (s *CmtRPCService) Syncing() (*ctypes.SyncInfo, error) {
+	status, err := s.backend.localClient.Status()
+	if err != nil {
+		return nil, err
+	}
+
+	return &status.SyncInfo, nil
 }
 
 type DeclareCandidacyArgs struct {
@@ -231,12 +281,16 @@ func (s *CmtRPCService) WithdrawCandidacy(args WithdrawCandidacyArgs) (*ctypes.R
 type UpdateCandidacyArgs struct {
 	Nonce       *hexutil.Uint64   `json:"nonce"`
 	From        common.Address    `json:"from"`
-	MaxAmount   hexutil.Big       `json:"maxAmount"`
+	MaxAmount   *hexutil.Big      `json:"maxAmount"`
 	Description stake.Description `json:"description"`
 }
 
 func (s *CmtRPCService) UpdateCandidacy(args UpdateCandidacyArgs) (*ctypes.ResultBroadcastTxCommit, error) {
-	tx := stake.NewTxUpdateCandidacy(args.MaxAmount.ToInt().String(), args.Description)
+	maxAmount := ""
+	if args.MaxAmount != nil {
+		maxAmount = args.MaxAmount.ToInt().String()
+	}
+	tx := stake.NewTxUpdateCandidacy(maxAmount, args.Description)
 
 	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
 	if err != nil {
@@ -258,6 +312,22 @@ func (s *CmtRPCService) VerifyCandidacy(args VerifyCandidacyArgs) (*ctypes.Resul
 		return nil, fmt.Errorf("must provide new address")
 	}
 	tx := stake.NewTxVerifyCandidacy(args.CandidateAddress, args.Verified)
+
+	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.sendTransaction(txArgs)
+}
+
+type ActivateCandidacyArgs struct {
+	Nonce *hexutil.Uint64 `json:"nonce"`
+	From  common.Address  `json:"from"`
+}
+
+func (s *CmtRPCService) ActivateCandidacy(args ActivateCandidacyArgs) (*ctypes.ResultBroadcastTxCommit, error) {
+	tx := stake.NewTxActivateCandidacy()
 
 	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
 	if err != nil {
@@ -345,7 +415,7 @@ func (s *CmtRPCService) QueryDelegator(address common.Address, height uint64) (*
 	return &StakeQueryResult{h, slotDelegates}, nil
 }
 
-type GovernanceProposalArgs struct {
+type GovernanceTransferFundProposalArgs struct {
 	Nonce        *hexutil.Uint64 `json:"nonce"`
 	From         common.Address  `json:"from"`
 	TransferFrom common.Address  `json:"transferFrom"`
@@ -355,8 +425,28 @@ type GovernanceProposalArgs struct {
 	Expire       uint64          `json:"expire"`
 }
 
-func (s *CmtRPCService) Propose(args GovernanceProposalArgs) (*ctypes.ResultBroadcastTxCommit, error) {
-	tx := governance.NewTxPropose(&args.From, &args.TransferFrom, &args.TransferTo, args.Amount.ToInt().String(), args.Reason, args.Expire)
+func (s *CmtRPCService) Propose(args GovernanceTransferFundProposalArgs) (*ctypes.ResultBroadcastTxCommit, error) {
+	tx := governance.NewTxTransferFundPropose(&args.From, &args.TransferFrom, &args.TransferTo, args.Amount.ToInt().String(), args.Reason, args.Expire)
+
+	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
+	if err != err {
+		return nil, err
+	}
+
+	return s.sendTransaction(txArgs)
+}
+
+type GovernanceChangeParamProposalArgs struct {
+	Nonce        *hexutil.Uint64 `json:"nonce"`
+	From         common.Address  `json:"from"`
+	Name         string          `json:"name"`
+	Value        string          `json:"value"`
+	Reason       string          `json:"reason"`
+	Expire       uint64          `json:"expire"`
+}
+
+func (s *CmtRPCService) ProposeChangeParam(args GovernanceChangeParamProposalArgs) (*ctypes.ResultBroadcastTxCommit, error) {
+	tx := governance.NewTxChangeParamPropose(&args.From, args.Name, args.Value, args.Reason, args.Expire)
 
 	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
 	if err != err {

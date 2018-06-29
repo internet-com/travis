@@ -10,7 +10,7 @@ const transfer = (f, t, v, gasPrice, nonce) => {
     from: f,
     to: t,
     value: v,
-    gasPrice: web3.toWei(gasPrice || 0, "gwei")
+    gasPrice: gasPrice || 0
   }
   if (nonce) payload.nonce = nonce
   let hash = null
@@ -70,7 +70,7 @@ const tokenTransfer = function(f, t, v, gasPrice, nonce) {
   let tokenInstance = tokenContract.at(contractAddress)
   let option = {
     from: f,
-    gasPrice: web3.toWei(gasPrice || 0, "gwei")
+    gasPrice: gasPrice || 0
   }
   if (nonce) option.nonce = nonce
   let hash = null
@@ -103,6 +103,36 @@ const getTokenBalance = () => {
   }
   logger.debug(`token balance: --> ${balance}`)
   return balance
+}
+
+const getDelegation = (acc_index, pk_index) => {
+  let delegation = {
+    delegate_amount: web3.toBigNumber(0),
+    award_amount: web3.toBigNumber(0),
+    withdraw_amount: web3.toBigNumber(0),
+    slash_amount: web3.toBigNumber(0)
+  }
+  result = web3.cmt.stake.delegator.query(Globals.Accounts[acc_index], 0)
+  if (result && result.data) {
+    let data = result.data.find(
+      d => d.pub_key.value == Globals.PubKeys[pk_index]
+    )
+    if (data)
+      delegation = {
+        delegate_amount: web3.toBigNumber(data.delegate_amount),
+        award_amount: web3.toBigNumber(data.award_amount),
+        withdraw_amount: web3.toBigNumber(data.withdraw_amount),
+        slash_amount: web3.toBigNumber(data.slash_amount)
+      }
+  }
+  logger.debug(
+    "delegation: --> ",
+    `delegate_amount: ${delegation.delegate_amount.toString(10)}`,
+    `award_amount: ${delegation.award_amount.toString(10)}`,
+    `withdraw_amount: ${delegation.withdraw_amount.toString(10)}`,
+    `slash_amount: ${delegation.slash_amount.toString(10)}`
+  )
+  return delegation
 }
 
 const calcAward = powers => {
@@ -156,6 +186,8 @@ const getProposal = proposalId => {
   if (proposalId === "") return
 
   let r = web3.cmt.governance.queryProposals()
+  logger.debug("getProposal:", r)
+
   expect(r.data.length).to.be.above(0)
   if (r.data.length > 0) {
     proposal = r.data.filter(d => d.Id == proposalId)
@@ -217,6 +249,7 @@ const waitBlocks = (done, blocks = 1) => {
   logger.debug("waiting start: ", startingBlock)
   let interval = setInterval(() => {
     let blocksGone = web3.cmt.blockNumber - startingBlock
+    logger.debug(`Blocks Passed ${blocksGone}`)
     if (blocksGone == blocks) {
       logger.debug("waiting end. ")
       clearInterval(interval)
@@ -245,6 +278,23 @@ const expectTxSuccess = r => {
     .and.to.gt(0)
 }
 
+const gasFee = txType => {
+  let gasPrice = web3.toBigNumber(Globals.GasPrice)
+  let gasLimit = 0
+  switch (txType) {
+    case "declareCandidacy":
+      gasLimit = web3.toBigNumber(Globals.GasLimit.DeclareCandidacy)
+      break
+    case "updateCandidacy":
+      gasLimit = web3.toBigNumber(Globals.GasLimit.UpdateCandidacy)
+      break
+    case "governancePropose":
+      gasLimit = web3.toBigNumber(Globals.GasLimit.GovernancePropose)
+      break
+  }
+  return gasPrice.times(gasLimit)
+}
+
 module.exports = {
   transfer,
   getBalance,
@@ -252,6 +302,7 @@ module.exports = {
   tokenTransfer,
   tokenKill,
   getTokenBalance,
+  getDelegation,
   calcAwards,
   vote,
   getProposal,
@@ -259,5 +310,6 @@ module.exports = {
   waitMultiple,
   waitBlocks,
   expectTxFail,
-  expectTxSuccess
+  expectTxSuccess,
+  gasFee
 }

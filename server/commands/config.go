@@ -18,8 +18,7 @@ const (
 	defaultConfigDir = "config"
 	defaultDataDir   = "data"
 
-	configFile        = "config.toml"
-	defaultEthChainId = 111
+	configFile = "config.toml"
 )
 
 type TravisConfig struct {
@@ -47,7 +46,7 @@ func DefaultBaseConfig() BaseConfig {
 }
 
 type EthermintConfig struct {
-	EthChainId        uint   `mapstructure:"eth_chain_id"`
+	ChainId           uint   `mapstructure:"chainid"`
 	RootDir           string `mapstructure:"home"`
 	ABCIAddr          string `mapstructure:"abci_laddr"`
 	ABCIProtocol      string `mapstructure:"abci_protocol"`
@@ -65,7 +64,7 @@ type EthermintConfig struct {
 
 func DefaultEthermintConfig() EthermintConfig {
 	return EthermintConfig{
-		EthChainId:        defaultEthChainId,
+		ChainId:           TestNet,
 		ABCIAddr:          "tcp://0.0.0.0:8848",
 		ABCIProtocol:      "socket",
 		RPCEnabledFlag:    true,
@@ -85,6 +84,16 @@ func DefaultEthermintConfig() EthermintConfig {
 // to call our revised EnsureRoot
 func ParseConfig() (*TravisConfig, error) {
 	conf := DefaultConfig()
+	// set chainid as per --env
+	switch viper.GetString(FlagENV) {
+	case "staging":
+		conf.EMConfig.ChainId = Staging
+	case "mainnet":
+		conf.EMConfig.ChainId = MainNet
+	case "testnet":
+		conf.EMConfig.ChainId = TestNet
+	}
+
 	err := viper.Unmarshal(&conf)
 	if err != nil {
 		return nil, err
@@ -150,6 +159,7 @@ func AppendVMConfig(configFilePath string, conf *TravisConfig) {
 
 var defaultVmTemplate = `
 [vm]
+chainid = {{ .EMConfig.ChainId }}
 rpc = {{ .EMConfig.RPCEnabledFlag }}
 rpcapi = "{{ .EMConfig.RPCApiFlag }}"
 rpcaddr = "{{ .EMConfig.RPCListenAddrFlag }}"

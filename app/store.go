@@ -26,6 +26,7 @@ import (
 	"github.com/tendermint/tmlibs/cli"
 	"golang.org/x/crypto/ripemd160"
 	"os"
+	"math/big"
 )
 
 // DefaultHistorySize is how many blocks of history to store for ABCI queries
@@ -50,6 +51,8 @@ type StoreApp struct {
 	// height is last committed block, DeliverTx is the next one
 	height int64
 
+	TotalUsedGasFee *big.Int
+
 	logger log.Logger
 }
 
@@ -70,6 +73,7 @@ func NewStoreApp(appName, dbName string, cacheSize int, logger log.Logger) (*Sto
 		state:  state,
 		height: state.LatestHeight(),
 		info:   sm.NewChainState(),
+		TotalUsedGasFee: big.NewInt(0),
 		logger: logger.With("module", "app"),
 	}
 	return app, nil
@@ -266,7 +270,7 @@ func (app *StoreApp) AddValChange(diffs []abci.Validator) {
 // return index of list with validator of same PubKey, or -1 if no match
 func pubKeyIndex(val abci.Validator, list []abci.Validator) int {
 	for i, v := range list {
-		if bytes.Equal(val.PubKey, v.PubKey) {
+		if bytes.Equal(val.PubKey.Data, v.PubKey.Data) {
 			return i
 		}
 	}
@@ -315,7 +319,7 @@ func initTravisDb() error {
 		defer db.Close()
 
 		sqlStmt := `
-		create table candidates(address text not null primary key, pub_key text not null, shares text not null default '0', voting_power integer default 0, max_shares text not null default '0', comp_rate text not null default '0', website text not null default '', location text not null default '', details text not null default '', verified text not null default 'N', active text not null default 'Y', hash text not null default '', block_height integer not null, created_at text not null, updated_at text not null default '');
+		create table candidates(address text not null primary key, pub_key text not null, shares text not null default '0', voting_power integer default 0, max_shares text not null default '0', comp_rate text not null default '0', name text not null default '', website text not null default '', location text not null default '', email text not null default '', profile text not null default '', verified text not null default 'N', active text not null default 'Y', rank integer not null default 0, state text not null default '', hash text not null default '', block_height integer not null, created_at text not null, updated_at text not null default '');
 		create unique index idx_candidates_pub_key on candidates(pub_key);
 		create index idx_candidates_hash on candidates(hash);
 
@@ -333,8 +337,14 @@ func initTravisDb() error {
 
 		create table unstake_requests(id text not null primary key, delegator_address text not null, pub_key text not null, initiated_block_height integer default 0, performed_block_height integer default 0, amount text not null default '0', state text not null default 'PENDING', created_at text not null, updated_at text not null default '');
 
-		create table governance_proposal(id text not null primary key, proposer text not null, block_height integer not null, from_address text not null, to_address text not null, amount text not null, reason text not null, expire_block_height text not null, hash text not null default '', created_at text not null, result text not null default '', result_msg text not null default '', result_block_height integer not null default 0, result_at text not null default '');
+		create table governance_proposal(id text not null primary key, type text not null, proposer text not null, block_height integer not null, expire_block_height integer not null, hash text not null default '', created_at text not null, result text not null default '', result_msg text not null default '', result_block_height integer not null default 0, result_at text not null default '');
 		create index idx_governance_proposal_hash on governance_proposal(hash);
+
+		create table governance_transfer_fund_detail(proposal_id text not null, from_address text not null, to_address text not null, amount text not null, reason text not null);
+		create index idx_governance_transfer_fund_detail_proposal_id on governance_transfer_fund_detail(proposal_id);
+
+		create table governance_change_param_detail(proposal_id text not null, param_name text not null, param_value text not null, reason text not null);
+		create index idx_governance_change_param_detail_proposal_id on governance_change_param_detail(proposal_id);
 
 		create table governance_vote(proposal_id text not null, voter text not null, block_height integer not null, answer text not null,  hash text not null default '', created_at text not null, unique(proposal_id, voter) ON conflict replace);
 		create index idx_governance_vote_voter on governance_vote(voter);

@@ -18,6 +18,7 @@ import (
 	"github.com/CyberMiles/travis/modules/stake"
 	ttypes "github.com/CyberMiles/travis/types"
 	"github.com/CyberMiles/travis/utils"
+	"github.com/tendermint/go-crypto"
 	"golang.org/x/crypto/ripemd160"
 )
 
@@ -29,7 +30,7 @@ type BaseApp struct {
 	ethereum            *eth.Ethereum
 	AbsentValidators    *stake.AbsentValidators
 	ByzantineValidators []abci.Evidence
-	LastValidators      []stake.Validator
+	PresentValidators   stake.Validators
 }
 
 const (
@@ -52,6 +53,11 @@ func NewBaseApp(store *StoreApp, ethApp *EthermintApplication, ethereum *eth.Eth
 			proposals[pp.Id] = pp.ExpireBlockHeight
 		}
 		utils.PendingProposal.BatchAdd(proposals)
+	}
+
+	b := store.Append().Get(utils.ParamKey)
+	if b != nil {
+		utils.LoadParams(b)
 	}
 
 	app := &BaseApp{
@@ -100,8 +106,10 @@ func (app *BaseApp) DeliverTx(txBytes []byte) abci.ResponseDeliverTx {
 			tx = checkedTx
 		} else {
 			// force cache from of tx
-			// TODO: Get chainID from config
-			if _, err := types.Sender(types.NewEIP155Signer(big.NewInt(111)), tx); err != nil {
+			networkId := big.NewInt(int64(app.ethereum.NetVersion()))
+			signer := types.NewEIP155Signer(networkId)
+
+			if _, err := types.Sender(signer, tx); err != nil {
 				app.logger.Debug("DeliverTx: Received invalid transaction", "tx", tx, "err", err)
 				return errors.DeliverResult(err)
 			}
@@ -144,17 +152,24 @@ func (app *BaseApp) CheckTx(txBytes []byte) abci.ResponseCheckTx {
 // BeginBlock - ABCI
 func (app *BaseApp) BeginBlock(req abci.RequestBeginBlock) (res abci.ResponseBeginBlock) {
 	app.EthApp.BeginBlock(req)
+	app.PresentValidators = app.PresentValidators[:0]
 
 	// handle the absent validators
-	for _, i := range req.AbsentValidators {
-		app.logger.Debug("BeginBlock", "index", i)
-		if i >= int32(len(app.LastValidators)) {
-			continue
-		}
+	for _, sv := range req.Validators {
+		var pk crypto.PubKeyEd25519
+		copy(pk[:], sv.Validator.PubKey.Data)
 
-		v := app.LastValidators[i]
-		app.AbsentValidators.Add(v.PubKey, app.WorkingHeight())
+		pubKey := ttypes.PubKey{pk}
+		if !sv.SignedLastBlock {
+			app.AbsentValidators.Add(pubKey, app.WorkingHeight())
+		} else {
+			v := stake.GetCandidateByPubKey(ttypes.PubKeyString(pubKey))
+			if v != nil {
+				app.PresentValidators = append(app.PresentValidators, v.Validator())
+			}
+		}
 	}
+
 	app.AbsentValidators.Clear(app.WorkingHeight())
 
 	app.logger.Info("BeginBlock", "absent_validators", app.AbsentValidators)
@@ -166,18 +181,14 @@ func (app *BaseApp) BeginBlock(req abci.RequestBeginBlock) (res abci.ResponseBeg
 // EndBlock - ABCI - triggers Tick actions
 func (app *BaseApp) EndBlock(req abci.RequestEndBlock) (res abci.ResponseEndBlock) {
 	app.EthApp.EndBlock(req)
-
-	cs := stake.GetCandidates()
-	cs.Sort()
-	validators := cs.Validators()
-
+	utils.BlockGasFee = big.NewInt(0).Add(utils.BlockGasFee, app.TotalUsedGasFee)
 	// block award
-	stake.NewAwardDistributor(app.WorkingHeight(), validators, utils.BlockGasFee, app.AbsentValidators, app.logger).DistributeAll()
+	stake.NewAwardDistributor(app.WorkingHeight(), app.PresentValidators, utils.BlockGasFee, app.logger).DistributeAll()
 
 	// punish Byzantine validators
 	if len(app.ByzantineValidators) > 0 {
 		for _, bv := range app.ByzantineValidators {
-			pk, err := ttypes.GetPubKey(string(bv.PubKey))
+			pk, err := ttypes.GetPubKey(string(bv.Validator.PubKey.Data))
 			if err != nil {
 				continue
 			}
@@ -199,10 +210,6 @@ func (app *BaseApp) EndBlock(req abci.RequestEndBlock) (res abci.ResponseEndBloc
 	}
 	app.AddValChange(diff)
 
-	lastValidators := cs.Validators()
-	lastValidators.Sort()
-	app.LastValidators = lastValidators
-
 	// handle the pending unstake requests
 	stake.HandlePendingUnstakeRequests(app.WorkingHeight(), app.Append())
 
@@ -213,11 +220,20 @@ func (app *BaseApp) Commit() (res abci.ResponseCommit) {
 	app.checkedTx = make(map[common.Hash]*types.Transaction)
 	ethAppCommit := app.EthApp.Commit()
 
+	if dirty := utils.CleanParams(); dirty {
+		state := app.Append()
+		state.Set(utils.ParamKey, utils.UnloadParams())
+	}
+
 	workingHeight := app.WorkingHeight()
+
+	// reset store app
+	app.TotalUsedGasFee = big.NewInt(0)
 
 	res = app.StoreApp.Commit()
 	dbHash := app.StoreApp.GetDbHash()
 	res.Data = finalAppHash(ethAppCommit.Data, res.Data, dbHash, workingHeight, nil)
+
 	return
 }
 
@@ -234,11 +250,16 @@ func (app *BaseApp) InitState(module, key string, value interface{}) error {
 		return fmt.Errorf("unknown base option: %s", key)
 	}
 
-	err := stake.InitState(key, value, state)
-	if err != nil {
-		logger.Error("Invalid genesis option", "err", err)
+	if key == "validator" {
+		stake.SetValidator(value.(ttypes.GenesisValidator), state)
+	} else {
+		if set := utils.SetParam(key, value.(string)); !set {
+			return errors.ErrUnknownKey(key)
+		}
 	}
-	return err
+
+
+	return nil
 }
 
 // Tick - Called every block even if no transaction, process all queues,

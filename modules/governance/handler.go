@@ -15,9 +15,6 @@ import (
 	"encoding/json"
 )
 
-// default proposal expiration = block count of 7 days
-const defaultProposalExpire uint64 = 7 * 24 * 60 * 60 / 10
-
 // nolint
 const governanceModuleName = "governance"
 
@@ -45,7 +42,7 @@ func CheckTx(ctx types.Context, store state.SimpleDB,
 	}
 
 	switch txInner := tx.Unwrap().(type) {
-	case TxPropose:
+	case TxTransferFundPropose:
 		if !bytes.Equal(txInner.Proposer.Bytes(), sender.Bytes()) {
 			return sdk.NewCheck(0, ""), ErrMissingSignature()
 		}
@@ -73,7 +70,37 @@ func CheckTx(ctx types.Context, store state.SimpleDB,
 		if balance.Cmp(amount) < 0 {
 			return sdk.NewCheck(0, ""), ErrInsufficientBalance()
 		}
+
+		// Transfer gasFee  -- start
+		balance, err = commons.GetBalance(state, sender)
+		if err != nil {
+			return sdk.NewCheck(0, ""), ErrInvalidParamerter()
+		}
+		params := utils.GetParams()
+		gasFee := utils.CalGasFee(params.GovernancePropose, params.GasPrice)
+
+		if balance.Cmp(gasFee) < 0 {
+			return sdk.NewCheck(0, ""), ErrInsufficientBalance()
+		}
+		// Check gasFee  -- end
+
 		utils.TravisTxAddrs = append(utils.TravisTxAddrs, txInner.From)
+	case TxChangeParamPropose:
+		if !bytes.Equal(txInner.Proposer.Bytes(), sender.Bytes()) {
+			return sdk.NewCheck(0, ""), ErrMissingSignature()
+		}
+		validators := stake.GetCandidates().Validators()
+		if validators == nil || validators.Len() == 0 {
+			return sdk.NewCheck(0, ""), ErrInvalidValidator()
+		}
+		for i, v := range validators {
+			if v.OwnerAddress == txInner.Proposer.String() {
+				break
+			}
+			if i + 1 == len(validators) {
+				return sdk.NewCheck(0, ""), ErrInvalidValidator()
+			}
+		}
 	case TxVote:
 		if !bytes.Equal(txInner.Voter.Bytes(), sender.Bytes()) {
 			return sdk.NewCheck(0, ""), ErrMissingSignature()
@@ -106,7 +133,9 @@ func CheckTx(ctx types.Context, store state.SimpleDB,
 		if vote := GetVoteByPidAndVoter(txInner.ProposalId, txInner.Voter.String()); vote != nil {
 			return sdk.NewCheck(0, ""), ErrRepeatedVote()
 		}
-		utils.TravisTxAddrs = append(utils.TravisTxAddrs, proposal.To)
+		if proposal.Type == TRANSFER_FUND_PROPOSAL {
+			utils.TravisTxAddrs = append(utils.TravisTxAddrs, proposal.Detail["to"].(*common.Address))
+		}
 	}
 
 	return
@@ -121,14 +150,15 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 		return
 	}
 
+	res.GasFee = big.NewInt(0)
 	switch txInner := tx.Unwrap().(type) {
-	case TxPropose:
-		expire := defaultProposalExpire
+	case TxTransferFundPropose:
+		expire := utils.GetParams().ProposalExpirePeriod
 		if txInner.Expire != 0 {
 			expire = txInner.Expire
 		}
 		hashJson, _ :=	json.Marshal(hash)
-		pp := NewProposal(
+		pp := NewTransferFundProposal(
 			string(hashJson[1:len(hashJson)-1]),
 			txInner.Proposer,
 			uint64(ctx.BlockHeight()),
@@ -136,7 +166,7 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 			txInner.To,
 			txInner.Amount,
 			txInner.Reason,
-			uint64(ctx.BlockHeight())+expire,
+			uint64(ctx.BlockHeight()) + expire,
 		)
 
 		state := ctx.EthappState()
@@ -152,9 +182,52 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 		}
 
 		SaveProposal(pp)
-		commons.TransferWithReactor(*pp.From, utils.GovHoldAccount, amount, ProposalReactor{pp.Id, uint64(ctx.BlockHeight()), ""})
+		commons.TransferWithReactor(*pp.Detail["from"].(*common.Address), utils.GovHoldAccount, amount, ProposalReactor{pp.Id, uint64(ctx.BlockHeight()), ""})
+
+		// Check gasFee  -- start
+		// get the sender
+		sender, err := getTxSender(ctx)
+		if err != nil {
+			return res, err
+		}
+		balance, err = commons.GetBalance(state, sender)
+		if err != nil {
+			return res, ErrInvalidParamerter()
+		}
+		params := utils.GetParams()
+		gasFee := utils.CalGasFee(params.GovernancePropose, params.GasPrice)
+		res.GasFee = gasFee
+
+		if balance.Cmp(gasFee) < 0 {
+			return res, ErrInsufficientBalance()
+		}
+		res.GasUsed = int64(params.GovernancePropose)
+		// transfer gasFee
+		commons.Transfer(sender, utils.HoldAccount, gasFee)
+		// Check gasFee  -- end
 
 		utils.PendingProposal.Add(pp.Id, pp.ExpireBlockHeight)
+
+		res.Data = hash
+
+	case TxChangeParamPropose:
+		expire := utils.GetParams().ProposalExpirePeriod
+		if txInner.Expire != 0 {
+			expire = txInner.Expire
+		}
+		hashJson, _ := json.Marshal(hash)
+		cp := NewChangeParamProposal(
+			string(hashJson[1:len(hashJson)-1]),
+			txInner.Proposer,
+			uint64(ctx.BlockHeight()),
+			txInner.Name,
+			txInner.Value,
+			txInner.Reason,
+			uint64(ctx.BlockHeight()) + expire,
+		)
+		SaveProposal(cp)
+
+		utils.PendingProposal.Add(cp.Id, cp.ExpireBlockHeight)
 
 		res.Data = hash
 
@@ -168,21 +241,35 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 		SaveVote(vote)
 
 		proposal := GetProposalById(txInner.ProposalId)
-		amount := new(big.Int)
-		amount.SetString(proposal.Amount, 10)
 
-		switch CheckProposal(txInner.ProposalId, &txInner.Voter) {
-		case "approved":
-			// as succeeded proposal only need to add balance to receiver,
-			// so the transfer should always be successful
-			// but we still use the reactor to keep the compatible with the old strategy
-			commons.TransferWithReactor(utils.GovHoldAccount, *proposal.To, amount, ProposalReactor{proposal.Id, uint64(ctx.BlockHeight()), "Approved"})
-			utils.PendingProposal.Del(proposal.Id)
-		case "rejected":
-			// as succeeded proposal only need to refund balance to sender,
-			// so the transfer should always be successful
-			// but we still use the reactor to keep the compatible with the old strategy
-			commons.TransferWithReactor(utils.GovHoldAccount, *proposal.From, amount, ProposalReactor{proposal.Id, uint64(ctx.BlockHeight()), "Rejected"})
+		checkResult := CheckProposal(txInner.ProposalId, &txInner.Voter)
+
+		switch proposal.Type {
+		case TRANSFER_FUND_PROPOSAL:
+			amount := new(big.Int)
+			amount.SetString(proposal.Detail["amount"].(string), 10)
+			switch checkResult {
+			case "approved":
+				// as succeeded proposal only need to add balance to receiver,
+				// so the transfer should always be successful
+				// but we still use the reactor to keep the compatible with the old strategy
+				commons.TransferWithReactor(utils.GovHoldAccount, *proposal.Detail["to"].(*common.Address), amount, ProposalReactor{proposal.Id, uint64(ctx.BlockHeight()), "Approved"})
+			case "rejected":
+				// as succeeded proposal only need to refund balance to sender,
+				// so the transfer should always be successful
+				// but we still use the reactor to keep the compatible with the old strategy
+				commons.TransferWithReactor(utils.GovHoldAccount, *proposal.Detail["from"].(*common.Address), amount, ProposalReactor{proposal.Id, uint64(ctx.BlockHeight()), "Rejected"})
+			}
+		case CHANGE_PARAM_PROPOSAL:
+			switch checkResult {
+			case "approved":
+				utils.SetParam(proposal.Detail["name"].(string), proposal.Detail["value"].(string))
+				ProposalReactor{proposal.Id, uint64(ctx.BlockHeight()), "Approved"}.React("success", "")
+			case "rejected":
+				ProposalReactor{proposal.Id, uint64(ctx.BlockHeight()), "Rejected"}.React("success", "")
+			}
+		}
+		if checkResult == "approved" || checkResult == "rejected" {
 			utils.PendingProposal.Del(proposal.Id)
 		}
 	}
@@ -228,12 +315,12 @@ func CheckProposal(pid string, voter *common.Address) string {
 
 	if approvedPower.Cmp(allPower) >= 0 {
 		// To avoid repeated commit, let's recheck with count of voters - voter
-		if approvedPower.Sub(approvedPower, voterPower).Cmp(allPower) < 0 {
+		if voter == nil || approvedPower.Sub(approvedPower, voterPower).Cmp(allPower) < 0 {
 			return "approved"
 		}
 	} else if rejectedPower.Cmp(allPower) >= 0 {
 		// To avoid repeated commit, let's recheck with count of voters - voter
-		if rejectedPower.Sub(rejectedPower, voterPower).Cmp(allPower) < 0 {
+		if voter == nil || rejectedPower.Sub(rejectedPower, voterPower).Cmp(allPower) < 0 {
 			return "rejected"
 		}
 	}

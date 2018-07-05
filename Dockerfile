@@ -39,6 +39,8 @@ WORKDIR /app
 COPY --from=build-env /go/src/github.com/CyberMiles/travis/build/travis .
 COPY --from=build-env /app/lib/*.so ./lib/
 
-EXPOSE 8545 46656 46657
+EXPOSE 8545
+EXPOSE 26656
+EXPOSE 26657
 
 ENTRYPOINT ["./travis"]
